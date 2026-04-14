@@ -239,6 +239,8 @@ with st.sidebar:
         st.caption("Save at least 2 snapshots to enable comparison.")
 
     st.markdown("---")
+anthropic_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+if not anthropic_key:
     anthropic_key = st.text_input("Anthropic API key", type="password",
                                   help="Required for AI Insights tab")
     st.caption("Creatio · Brand Visibility Tracker")
