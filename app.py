@@ -1,12 +1,13 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px
 import os
 import glob
+import json
+import requests
 from datetime import date
 
-# ── config ────────────────────────────────────────────────────────────────────
+# ── page config ───────────────────────────────────────────────────────────────
 
 st.set_page_config(
     page_title="Creatio · LLM Brand Visibility",
@@ -14,9 +15,10 @@ st.set_page_config(
     layout="wide",
 )
 
-BRAND = "creatio"
-DATA_DIR = "data"
+BRAND         = "creatio"
+DATA_DIR      = "data"
 CLUSTERS_FILE = "clusters.csv"
+ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 
 LLM_COLORS = {
     "ChatGPT": "#10A37F",
@@ -28,65 +30,50 @@ LLM_COLORS = {
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap');
-
-html, body, [class*="css"] {
-    font-family: 'DM Sans', sans-serif;
-}
-
-.block-container { padding-top: 2rem; }
-
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&family=DM+Mono:wght@400;500&display=swap');
+html, body, [class*="css"] { font-family: 'DM Sans', sans-serif; }
+.block-container { padding-top: 1.5rem; max-width: 1400px; }
 .metric-card {
-    background: #0f0f11;
-    border: 1px solid #222;
-    border-radius: 12px;
-    padding: 1.2rem 1.4rem;
-    margin-bottom: 0.5rem;
+    background: #0d0d10; border: 1px solid #1e1e24;
+    border-radius: 12px; padding: 1.1rem 1.3rem 1rem;
 }
 .metric-label {
-    font-size: 0.72rem;
-    font-weight: 500;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    color: #666;
-    margin-bottom: 0.3rem;
+    font-size: 0.68rem; font-weight: 600;
+    letter-spacing: 0.1em; text-transform: uppercase;
+    color: #555; margin-bottom: 0.35rem;
 }
 .metric-value {
-    font-size: 2rem;
-    font-weight: 600;
-    color: #f0f0f0;
-    font-family: 'DM Mono', monospace;
-    line-height: 1;
+    font-size: 2.1rem; font-weight: 600;
+    color: #efefef; font-family: 'DM Mono', monospace; line-height: 1;
 }
-.metric-delta-pos { color: #4ade80; font-size: 0.85rem; margin-top: 0.3rem; }
-.metric-delta-neg { color: #f87171; font-size: 0.85rem; margin-top: 0.3rem; }
-.metric-delta-neu { color: #888; font-size: 0.85rem; margin-top: 0.3rem; }
-
+.metric-sub { font-size: 0.78rem; margin-top: 0.35rem; }
+.up   { color: #4ade80; }
+.down { color: #f87171; }
+.neu  { color: #555; }
 .section-title {
-    font-size: 0.7rem;
-    font-weight: 600;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: #555;
-    margin: 2rem 0 1rem;
-    padding-bottom: 0.4rem;
-    border-bottom: 1px solid #1e1e1e;
+    font-size: 0.65rem; font-weight: 700;
+    letter-spacing: 0.14em; text-transform: uppercase;
+    color: #444; margin: 1.8rem 0 0.9rem;
+    padding-bottom: 0.35rem; border-bottom: 1px solid #1a1a20;
 }
-
-.pill {
-    display: inline-block;
-    padding: 2px 10px;
-    border-radius: 20px;
-    font-size: 0.75rem;
-    font-weight: 500;
-}
-.pill-up   { background: #052e16; color: #4ade80; }
-.pill-down { background: #2d0a0a; color: #f87171; }
-.pill-neu  { background: #1a1a1a; color: #888; }
-
 div[data-testid="stSidebar"] {
-    background: #0a0a0c;
-    border-right: 1px solid #1a1a1a;
+    background: #09090c; border-right: 1px solid #161618;
+}
+.stTabs [data-baseweb="tab-list"] { gap: 4px; }
+.stTabs [data-baseweb="tab"] {
+    font-size: 0.8rem; font-weight: 500;
+    letter-spacing: 0.04em; padding: 6px 16px;
+    border-radius: 6px; background: transparent;
+    border: 1px solid #1e1e24; color: #666;
+}
+.stTabs [aria-selected="true"] {
+    background: #1a1a24 !important; color: #eee !important;
+    border-color: #333 !important;
+}
+.warn {
+    background:#1a1200; border:1px solid #3a2e00;
+    border-radius:8px; padding:0.7rem 1rem;
+    color:#cca600; font-size:0.82rem;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -94,30 +81,27 @@ div[data-testid="stSidebar"] {
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 @st.cache_data
-def load_clusters():
+def load_clusters() -> pd.DataFrame:
     df = pd.read_csv(CLUSTERS_FILE)
     df["Keyword_lower"] = df["Prompt"].str.strip().str.lower()
     return df[["Keyword_lower", "Tags"]]
 
 
-def mentions_brand(cell):
-    if pd.isna(cell):
-        return False
-    return BRAND in str(cell).lower()
+def mentions_brand(cell) -> bool:
+    return False if pd.isna(cell) else BRAND in str(cell).lower()
 
 
 @st.cache_data
-def process_export(raw_bytes: bytes) -> pd.DataFrame:
+def process_export(raw_bytes: bytes) -> tuple:
     import io
     df = pd.read_csv(io.BytesIO(raw_bytes))
     df.columns = df.columns.str.strip()
     df["Keyword_lower"] = df["Keyword"].str.strip().str.lower()
     df["mentioned"] = df["Mentions"].apply(mentions_brand)
-
     clusters = load_clusters()
     merged = df.merge(clusters, on="Keyword_lower", how="left")
-    merged = merged[merged["Tags"].notna()].copy()
-    return merged
+    unmatched = sorted(merged[merged["Tags"].isna()]["Keyword"].unique().tolist())
+    return merged[merged["Tags"].notna()].copy(), unmatched
 
 
 def compute_coverage(df: pd.DataFrame) -> pd.DataFrame:
@@ -125,49 +109,45 @@ def compute_coverage(df: pd.DataFrame) -> pd.DataFrame:
     for (country, model, tag), grp in df.groupby(["Country", "Model", "Tags"]):
         uniq = grp.drop_duplicates("Keyword_lower")
         total = len(uniq)
-        mentioned = uniq["mentioned"].sum()
+        mentioned = int(uniq["mentioned"].sum())
         rows.append({
-            "Country": country,
-            "Model": model,
-            "Tags": tag,
-            "total_prompts": total,
-            "mentioned_prompts": int(mentioned),
-            "coverage_pct": round(mentioned / total * 100, 1) if total else 0,
+            "Country": country, "Model": model, "Tags": tag,
+            "total_prompts": total, "mentioned_prompts": mentioned,
+            "coverage_pct": round(mentioned / total * 100, 1) if total else 0.0,
         })
     return pd.DataFrame(rows)
 
 
-def load_snapshots() -> list[tuple[str, pd.DataFrame]]:
+def load_snapshots() -> list:
     files = sorted(glob.glob(f"{DATA_DIR}/snapshot_*.csv"), reverse=True)
-    return [(os.path.basename(f), pd.read_csv(f)) for f in files]
+    return [
+        (os.path.basename(f).replace("snapshot_", "").replace(".csv", ""),
+         pd.read_csv(f))
+        for f in files
+    ]
 
 
-def save_snapshot(df: pd.DataFrame, label: str):
+def save_snapshot(df: pd.DataFrame, label: str) -> str:
     os.makedirs(DATA_DIR, exist_ok=True)
     path = f"{DATA_DIR}/snapshot_{label}.csv"
     df.to_csv(path, index=False)
     return path
 
 
-def delta_card(label, current, previous=None):
-    if previous is not None and not pd.isna(previous):
-        diff = current - previous
-        if diff > 0:
-            delta_html = f'<div class="metric-delta-pos">▲ +{diff:.1f} pp vs poprzednio</div>'
-        elif diff < 0:
-            delta_html = f'<div class="metric-delta-neg">▼ {diff:.1f} pp vs poprzednio</div>'
-        else:
-            delta_html = f'<div class="metric-delta-neu">→ bez zmian</div>'
+def metric_card(label: str, value: float, prev=None):
+    if prev is not None and not pd.isna(prev):
+        diff = value - prev
+        sign = "▲" if diff > 0 else ("▼" if diff < 0 else "→")
+        cls  = "up" if diff > 0 else ("down" if diff < 0 else "neu")
+        sub  = f'<div class="metric-sub {cls}">{sign} {diff:+.1f} pp vs previous</div>'
     else:
-        delta_html = '<div class="metric-delta-neu">brak poprzedniego okresu</div>'
-
+        sub = '<div class="metric-sub neu">no previous period</div>'
     st.markdown(f"""
     <div class="metric-card">
         <div class="metric-label">{label}</div>
-        <div class="metric-value">{current:.1f}%</div>
-        {delta_html}
-    </div>
-    """, unsafe_allow_html=True)
+        <div class="metric-value">{value:.1f}%</div>
+        {sub}
+    </div>""", unsafe_allow_html=True)
 
 
 # ── sidebar ───────────────────────────────────────────────────────────────────
@@ -175,252 +155,327 @@ def delta_card(label, current, previous=None):
 with st.sidebar:
     st.markdown("## 📡 LLM Visibility")
     st.markdown("---")
-
-    uploaded = st.file_uploader(
-        "Wgraj eksport z Ahrefs",
-        type=["csv"],
-        help="Plik CSV z Ahrefs Brand Radar"
-    )
-
-    snapshot_label = st.text_input(
-        "Etykieta snapshotu",
-        value=str(date.today()),
-        help="np. 2026-04-14"
-    )
-
-    process_btn = st.button("▶ Generuj raport", use_container_width=True, type="primary")
-
+    uploaded = st.file_uploader("Upload Ahrefs export", type=["csv"])
+    snapshot_label = st.text_input("Snapshot label", value=str(date.today()))
+    process_btn = st.button("▶ Generate report", use_container_width=True,
+                            type="primary", disabled=(uploaded is None))
     st.markdown("---")
-
     snapshots = load_snapshots()
-    snapshot_names = [s[0] for s in snapshots]
-
-    compare_label = None
-    if len(snapshots) >= 1:
-        compare_with = st.selectbox(
-            "Porównaj z poprzednim snapshotem",
-            options=["(brak)"] + snapshot_names,
-        )
-        compare_label = compare_with if compare_with != "(brak)" else None
-
+    snap_labels = [s[0] for s in snapshots]
+    compare_snap = None
+    if snap_labels:
+        cmp_choice = st.selectbox("Compare with period", ["— none —"] + snap_labels)
+        if cmp_choice != "— none —":
+            compare_snap = next(s[1] for s in snapshots if s[0] == cmp_choice)
     st.markdown("---")
+    anthropic_key = st.text_input("Anthropic API key", type="password",
+                                  help="Required for AI Insights tab")
     st.caption("Creatio · Brand Visibility Tracker")
 
-# ── unmatched warning helper ──────────────────────────────────────────────────
-
-def show_unmatched(raw_bytes):
-    import io
-    df = pd.read_csv(io.BytesIO(raw_bytes))
-    df.columns = df.columns.str.strip()
-    df["Keyword_lower"] = df["Keyword"].str.strip().str.lower()
-    clusters = load_clusters()
-    merged = df.merge(clusters, on="Keyword_lower", how="left")
-    unmatched = merged[merged["Tags"].isna()]["Keyword"].unique()
-    if len(unmatched):
-        with st.expander(f"⚠️ {len(unmatched)} promptów bez klastra"):
-            st.caption("Te prompty są w eksporcie, ale nie ma ich w clusters.csv. Dodaj je do pliku i wgraj ponownie na GitHub.")
-            for kw in sorted(unmatched):
-                st.markdown(f"- `{kw}`")
-
-# ── main ──────────────────────────────────────────────────────────────────────
-
-st.markdown("# LLM Brand Visibility")
-st.markdown('<div class="section-title">Creatio · Brand Radar</div>', unsafe_allow_html=True)
+# ── no upload ─────────────────────────────────────────────────────────────────
 
 if not uploaded:
-    st.info("Wgraj plik CSV z Ahrefs Brand Radar w panelu bocznym, żeby zobaczyć raport.")
-
+    st.markdown("# LLM Brand Visibility")
     if snapshots:
-        st.markdown('<div class="section-title">Poprzednie snapshoty</div>', unsafe_allow_html=True)
-        latest_name, latest_df = snapshots[0]
-        st.caption(f"Ostatni snapshot: **{latest_name}**")
-
-        countries = sorted(latest_df["Country"].unique())
-        selected_country = st.selectbox("Kraj", countries)
-
-        filtered = latest_df[latest_df["Country"] == selected_country]
-
-        pivot = filtered.pivot_table(
+        st.info("No file uploaded — showing latest saved snapshot.")
+        _, latest_df = snapshots[0]
+        sel = st.selectbox("Country", sorted(latest_df["Country"].unique()))
+        flt = latest_df[latest_df["Country"] == sel]
+        pivot = flt.pivot_table(
             index="Tags", columns="Model", values="coverage_pct", aggfunc="first"
         ).reset_index()
-
+        pct_cols = [c for c in pivot.columns if c != "Tags"]
         st.dataframe(
-            pivot.style.background_gradient(cmap="Greens", subset=[c for c in pivot.columns if c != "Tags"]),
-            use_container_width=True,
-            hide_index=True,
+            pivot.style
+                .format({c: "{:.1f}%" for c in pct_cols})
+                .background_gradient(cmap="Greens", subset=pct_cols, vmin=0, vmax=100),
+            use_container_width=True, hide_index=True,
         )
+    else:
+        st.info("Upload an Ahrefs Brand Radar CSV export in the sidebar to get started.")
     st.stop()
 
-# ── process ───────────────────────────────────────────────────────────────────
+# ── process export ────────────────────────────────────────────────────────────
 
 raw_bytes = uploaded.read()
-show_unmatched(raw_bytes)
+merged, unmatched = process_export(raw_bytes)
+
+if unmatched:
+    with st.expander(f"⚠️ {len(unmatched)} prompts not found in clusters.csv"):
+        st.caption("Add these to clusters.csv and push to GitHub.")
+        for kw in unmatched:
+            st.markdown(f"- `{kw}`")
 
 if process_btn:
-    with st.spinner("Przetwarzam dane..."):
-        merged = process_export(raw_bytes)
-        coverage = compute_coverage(merged)
-        save_snapshot(coverage, snapshot_label)
-    st.success(f"Snapshot `{snapshot_label}` zapisany!")
+    with st.spinner("Processing…"):
+        save_snapshot(compute_coverage(merged), snapshot_label)
+    st.success(f"Snapshot `{snapshot_label}` saved. Push the `data/` folder to GitHub.")
     st.cache_data.clear()
-    snapshots = load_snapshots()
+    snapshots  = load_snapshots()
+    snap_labels = [s[0] for s in snapshots]
 
-merged = process_export(raw_bytes)
 coverage = compute_coverage(merged)
-
-# ── filters ───────────────────────────────────────────────────────────────────
-
 countries = sorted(coverage["Country"].unique())
-col_f1, col_f2 = st.columns([2, 4])
-with col_f1:
-    selected_country = st.selectbox("Kraj", countries)
 
-filtered = coverage[coverage["Country"] == selected_country]
+# ── global country filter ─────────────────────────────────────────────────────
 
-# ── load comparison snapshot ──────────────────────────────────────────────────
-
-compare_df = None
-if compare_label:
-    match = [s for s in snapshots if s[0] == compare_label]
-    if match:
-        compare_df = match[0][1]
-        compare_df = compare_df[compare_df["Country"] == selected_country]
-
-# ── avg share of voice cards ──────────────────────────────────────────────────
-
-st.markdown('<div class="section-title">Avg. Share of Voice</div>', unsafe_allow_html=True)
-
+st.markdown("# LLM Brand Visibility")
+sel_country = st.selectbox("Country", countries)
+filtered    = coverage[coverage["Country"] == sel_country]
+cmp_filtered = (compare_snap[compare_snap["Country"] == sel_country]
+                if compare_snap is not None else None)
 llms = sorted(filtered["Model"].unique())
-cols = st.columns(len(llms))
 
-for col, llm in zip(cols, llms):
-    with col:
-        avg = filtered[filtered["Model"] == llm]["coverage_pct"].mean()
-        prev_avg = None
-        if compare_df is not None:
-            prev_avg = compare_df[compare_df["Model"] == llm]["coverage_pct"].mean()
-        delta_card(llm, avg, prev_avg)
+# ── tabs ──────────────────────────────────────────────────────────────────────
 
-# ── coverage heatmap ──────────────────────────────────────────────────────────
+tab_overview, tab_compare, tab_responses, tab_insights = st.tabs([
+    "📊 Overview", "🔄 Period Comparison", "💬 LLM Responses", "🤖 AI Insights"
+])
 
-st.markdown('<div class="section-title">Coverage per klaster</div>', unsafe_allow_html=True)
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 1 — OVERVIEW
+# ════════════════════════════════════════════════════════════════════════════
+with tab_overview:
 
-pivot = filtered.pivot_table(
-    index="Tags", columns="Model", values="coverage_pct", aggfunc="first"
-).fillna(0).reset_index()
+    st.markdown('<div class="section-title">Avg. Share of Voice</div>',
+                unsafe_allow_html=True)
+    cols = st.columns(len(llms))
+    for col, llm in zip(cols, llms):
+        with col:
+            avg = filtered[filtered["Model"] == llm]["coverage_pct"].mean()
+            prev_avg = (cmp_filtered[cmp_filtered["Model"] == llm]["coverage_pct"].mean()
+                        if cmp_filtered is not None else None)
+            metric_card(llm, avg, prev_avg)
 
-# Bar chart per cluster
-clusters_order = pivot.sort_values(
-    by=[c for c in pivot.columns if c != "Tags"],
-    ascending=False
-)["Tags"].tolist()
-
-fig = go.Figure()
-for llm in [c for c in pivot.columns if c != "Tags"]:
-    color = LLM_COLORS.get(llm, "#888")
-    fig.add_trace(go.Bar(
-        name=llm,
-        x=pivot["Tags"],
-        y=pivot[llm],
-        marker_color=color,
-        marker_line_width=0,
-    ))
-
-fig.update_layout(
-    barmode="group",
-    plot_bgcolor="#0a0a0c",
-    paper_bgcolor="#0a0a0c",
-    font=dict(family="DM Sans", color="#aaa", size=12),
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    xaxis=dict(gridcolor="#1a1a1a", tickfont=dict(size=11)),
-    yaxis=dict(gridcolor="#1a1a1a", ticksuffix="%", range=[0, 110]),
-    margin=dict(l=0, r=0, t=30, b=0),
-    height=340,
-)
-st.plotly_chart(fig, use_container_width=True)
-
-# ── table with delta ──────────────────────────────────────────────────────────
-
-st.markdown('<div class="section-title">Tabela coverage</div>', unsafe_allow_html=True)
-
-if compare_df is not None:
-    compare_pivot = compare_df.pivot_table(
+    st.markdown('<div class="section-title">Coverage by cluster</div>',
+                unsafe_allow_html=True)
+    pivot = filtered.pivot_table(
         index="Tags", columns="Model", values="coverage_pct", aggfunc="first"
     ).fillna(0).reset_index()
 
+    fig = go.Figure()
     for llm in [c for c in pivot.columns if c != "Tags"]:
-        prev_col = compare_pivot.set_index("Tags")[llm] if llm in compare_pivot.columns else None
-        if prev_col is not None:
-            pivot[f"{llm} Δ"] = (
-                pivot.set_index("Tags")[llm] - prev_col
-            ).round(1).values
+        fig.add_trace(go.Bar(
+            name=llm, x=pivot["Tags"], y=pivot[llm],
+            marker_color=LLM_COLORS.get(llm, "#888"), marker_line_width=0,
+        ))
+    fig.update_layout(
+        barmode="group", plot_bgcolor="#09090c", paper_bgcolor="#09090c",
+        font=dict(family="DM Sans", color="#888", size=12),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1),
+        xaxis=dict(gridcolor="#161618"), yaxis=dict(gridcolor="#161618",
+                   ticksuffix="%", range=[0, 110]),
+        margin=dict(l=0, r=0, t=30, b=0), height=320,
+    )
+    st.plotly_chart(fig, use_container_width=True)
 
-display_cols = ["Tags"]
-for llm in [c for c in filtered["Model"].unique()]:
-    display_cols.append(llm)
-    delta_col = f"{llm} Δ"
-    if delta_col in pivot.columns:
-        display_cols.append(delta_col)
+    st.markdown('<div class="section-title">Coverage table</div>',
+                unsafe_allow_html=True)
+    pct_cols = [c for c in pivot.columns if c != "Tags"]
+    st.dataframe(
+        pivot.style
+            .format({c: "{:.1f}%" for c in pct_cols})
+            .background_gradient(cmap="Greens", subset=pct_cols, vmin=0, vmax=100),
+        use_container_width=True, hide_index=True,
+    )
+    st.download_button(
+        "⬇ Download snapshot CSV",
+        data=coverage.to_csv(index=False).encode(),
+        file_name=f"snapshot_{snapshot_label}.csv",
+        mime="text/csv",
+    )
 
-pivot_display = pivot[[c for c in display_cols if c in pivot.columns]]
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 2 — PERIOD COMPARISON
+# ════════════════════════════════════════════════════════════════════════════
+with tab_compare:
 
-def style_delta(val):
-    if pd.isna(val):
-        return ""
-    if isinstance(val, float) and abs(val) < 100:
-        if val > 0:
-            return "color: #4ade80"
-        elif val < 0:
-            return "color: #f87171"
-    return ""
+    if cmp_filtered is None:
+        st.info("Select a snapshot to compare with in the sidebar.")
+    else:
+        cur_piv = filtered.pivot_table(
+            index="Tags", columns="Model", values="coverage_pct", aggfunc="first"
+        ).fillna(0)
+        prv_piv = cmp_filtered.pivot_table(
+            index="Tags", columns="Model", values="coverage_pct", aggfunc="first"
+        ).fillna(0)
+        delta_piv = (cur_piv - prv_piv).round(1)
 
-pct_cols = [c for c in pivot_display.columns if "Δ" not in c and c != "Tags"]
-delta_cols = [c for c in pivot_display.columns if "Δ" in c]
+        st.markdown('<div class="section-title">Coverage change per LLM (pp)</div>',
+                    unsafe_allow_html=True)
 
-styled = pivot_display.style \
-    .format({c: "{:.1f}%" for c in pct_cols}) \
-    .format({c: lambda v: f"+{v:.1f} pp" if v > 0 else f"{v:.1f} pp" if not pd.isna(v) else "-" for c in delta_cols}) \
-    .applymap(style_delta, subset=delta_cols) \
-    .background_gradient(cmap="Greens", subset=pct_cols, vmin=0, vmax=100)
+        for llm in llms:
+            if llm not in delta_piv.columns:
+                continue
+            d = delta_piv[[llm]].reset_index()
+            d.columns = ["Tags", "delta"]
+            d = d.sort_values("delta")
+            bar_colors = [LLM_COLORS.get(llm, "#888") if v >= 0 else "#f87171"
+                          for v in d["delta"]]
+            fig2 = go.Figure(go.Bar(
+                x=d["delta"], y=d["Tags"], orientation="h",
+                marker_color=bar_colors, marker_line_width=0,
+                text=[f"{v:+.1f} pp" for v in d["delta"]],
+                textposition="outside",
+            ))
+            fig2.update_layout(
+                title=dict(text=llm, font=dict(size=13, color="#aaa")),
+                plot_bgcolor="#09090c", paper_bgcolor="#09090c",
+                font=dict(family="DM Sans", color="#888", size=11),
+                xaxis=dict(gridcolor="#161618", ticksuffix=" pp",
+                           zeroline=True, zerolinecolor="#333"),
+                yaxis=dict(gridcolor="#161618"),
+                margin=dict(l=0, r=70, t=35, b=0), height=270,
+            )
+            st.plotly_chart(fig2, use_container_width=True)
 
-st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.markdown('<div class="section-title">Delta table</div>',
+                    unsafe_allow_html=True)
+        delta_display = delta_piv.reset_index()
+        delta_cols = [c for c in delta_display.columns if c != "Tags"]
 
-# ── prompt detail ─────────────────────────────────────────────────────────────
+        def _style_delta(val):
+            if not isinstance(val, (int, float)) or pd.isna(val):
+                return ""
+            return "color: #4ade80" if val > 0 else ("color: #f87171" if val < 0 else "color:#555")
 
-st.markdown('<div class="section-title">Szczegóły promptów</div>', unsafe_allow_html=True)
+        def _fmt_delta(v):
+            if pd.isna(v): return "—"
+            return f"+{v:.1f} pp" if v > 0 else f"{v:.1f} pp"
 
-col_d1, col_d2, col_d3 = st.columns(3)
-with col_d1:
-    sel_cluster = st.selectbox("Klaster", ["Wszystkie"] + sorted(merged["Tags"].dropna().unique()))
-with col_d2:
-    sel_llm = st.selectbox("LLM", ["Wszystkie"] + sorted(merged["Model"].unique()))
-with col_d3:
-    sel_mention = st.selectbox("Wzmianka Creatio", ["Wszystkie", "Tak", "Nie"])
+        st.dataframe(
+            delta_display.style
+                .format({c: _fmt_delta for c in delta_cols})
+                .map(_style_delta, subset=delta_cols),
+            use_container_width=True, hide_index=True,
+        )
 
-detail = merged[merged["Country"] == selected_country].copy()
-if sel_cluster != "Wszystkie":
-    detail = detail[detail["Tags"] == sel_cluster]
-if sel_llm != "Wszystkie":
-    detail = detail[detail["Model"] == sel_llm]
-if sel_mention == "Tak":
-    detail = detail[detail["mentioned"] == True]
-elif sel_mention == "Nie":
-    detail = detail[detail["mentioned"] == False]
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 3 — LLM RESPONSES
+# ════════════════════════════════════════════════════════════════════════════
+with tab_responses:
 
-detail_display = detail[["Tags", "Keyword", "Model", "mentioned"]].drop_duplicates().sort_values(["Tags", "Model", "Keyword"])
-detail_display = detail_display.rename(columns={
-    "Tags": "Klaster", "Keyword": "Prompt", "Model": "LLM", "mentioned": "Creatio wspomniane"
-})
+    st.markdown('<div class="section-title">Response explorer</div>',
+                unsafe_allow_html=True)
 
-st.dataframe(detail_display, use_container_width=True, hide_index=True, height=350)
+    rc1, rc2, rc3, rc4 = st.columns(4)
+    with rc1:
+        r_country = st.selectbox("Country", countries, key="r_country")
+    with rc2:
+        r_cluster = st.selectbox(
+            "Cluster", ["All"] + sorted(merged["Tags"].dropna().unique()), key="r_cluster"
+        )
+    with rc3:
+        r_llm = st.selectbox(
+            "LLM", ["All"] + sorted(merged["Model"].unique()), key="r_llm"
+        )
+    with rc4:
+        r_mention = st.selectbox("Creatio mentioned", ["All", "Yes", "No"], key="r_mention")
 
-# ── download ──────────────────────────────────────────────────────────────────
+    rdf = merged[merged["Country"] == r_country].copy()
+    if r_cluster != "All": rdf = rdf[rdf["Tags"] == r_cluster]
+    if r_llm    != "All": rdf = rdf[rdf["Model"] == r_llm]
+    if r_mention == "Yes": rdf = rdf[rdf["mentioned"] == True]
+    elif r_mention == "No": rdf = rdf[rdf["mentioned"] == False]
 
-st.markdown("---")
-csv_out = coverage.to_csv(index=False).encode()
-st.download_button(
-    "⬇ Pobierz snapshot CSV",
-    data=csv_out,
-    file_name=f"snapshot_{snapshot_label}.csv",
-    mime="text/csv",
-)
+    rdf_dedup = rdf.drop_duplicates(subset=["Keyword", "Model"]).reset_index(drop=True)
+    st.caption(f"{len(rdf_dedup)} responses")
+
+    for _, row in rdf_dedup.iterrows():
+        badge = "✅ Creatio mentioned" if row["mentioned"] else "❌ Not mentioned"
+        with st.expander(f"**{row['Keyword']}** · {row['Model']} · {row.get('Tags','—')} · {badge}"):
+            ca, cb = st.columns([3, 1])
+            with ca:
+                st.markdown("**LLM Response**")
+                st.markdown(str(row.get("Response", "—")))
+            with cb:
+                st.markdown("**Brands mentioned**")
+                for m in str(row.get("Mentions", "")).split("\n"):
+                    m = m.strip()
+                    if m:
+                        st.markdown(f"🟢 **{m}**" if m.lower() == BRAND else f"- {m}")
+                urls = str(row.get("Link URL", ""))
+                if urls.strip():
+                    st.markdown("**Sources**")
+                    for link in urls.split("\n"):
+                        link = link.strip()
+                        if link.startswith("http"):
+                            st.markdown(f"[↗ {link[:45]}…]({link})")
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB 4 — AI INSIGHTS
+# ════════════════════════════════════════════════════════════════════════════
+with tab_insights:
+
+    st.markdown('<div class="section-title">AI-powered analysis</div>',
+                unsafe_allow_html=True)
+
+    if not anthropic_key:
+        st.markdown(
+            '<div class="warn">Paste your Anthropic API key in the sidebar to enable AI Insights.</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        if st.button("🤖 Generate insights", type="primary"):
+            cov_json = filtered.to_dict(orient="records")
+            delta_summary = ""
+            if cmp_filtered is not None:
+                cur_p = filtered.pivot_table(
+                    index="Tags", columns="Model",
+                    values="coverage_pct", aggfunc="first"
+                ).fillna(0)
+                prv_p = cmp_filtered.pivot_table(
+                    index="Tags", columns="Model",
+                    values="coverage_pct", aggfunc="first"
+                ).fillna(0)
+                delta_summary = f"\n\nDELTA vs previous period:\n{(cur_p - prv_p).round(1).to_string()}"
+
+            prompt = f"""You are a senior digital marketing analyst specializing in AI/LLM brand visibility for B2B SaaS companies.
+
+Analyze the following LLM brand visibility data for Creatio (a no-code CRM and workflow automation platform).
+
+COVERAGE DATA (country: {sel_country}):
+{json.dumps(cov_json, indent=2)}{delta_summary}
+
+Provide a structured analysis:
+1. **Overall performance** — how is Creatio performing across LLMs?
+2. **Strongest clusters** — where does Creatio appear most consistently and why?
+3. **Blind spots** — where is visibility low or zero? What might explain this?
+4. **LLM differences** — notable differences between ChatGPT, Gemini, Copilot?
+5. **Key changes** (if delta data available) — what improved, what declined?
+6. **Recommended actions** — 2-3 concrete priorities for the marketing team.
+
+Be specific, reference actual numbers, write in clear business English."""
+
+            with st.spinner("Analyzing with Claude…"):
+                try:
+                    resp = requests.post(
+                        ANTHROPIC_URL,
+                        headers={
+                            "x-api-key": anthropic_key,
+                            "anthropic-version": "2023-06-01",
+                            "content-type": "application/json",
+                        },
+                        json={
+                            "model": "claude-sonnet-4-20250514",
+                            "max_tokens": 1500,
+                            "messages": [{"role": "user", "content": prompt}],
+                        },
+                        timeout=60,
+                    )
+                    resp.raise_for_status()
+                    st.session_state["last_insight"] = resp.json()["content"][0]["text"]
+                except requests.exceptions.HTTPError as e:
+                    st.error(f"API error {e.response.status_code}: {e.response.text}")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+        if "last_insight" in st.session_state:
+            st.markdown(st.session_state["last_insight"])
+            st.download_button(
+                "⬇ Download insights",
+                data=st.session_state["last_insight"],
+                file_name=f"insights_{snapshot_label}_{sel_country}.txt",
+                mime="text/plain",
+            )
