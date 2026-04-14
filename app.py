@@ -134,13 +134,26 @@ def compute_coverage(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+SNAPSHOT_COLS = {"Country", "Model", "Tags", "coverage_pct"}
+
 def load_snapshots() -> list:
-    """Returns list of (label, df) sorted newest first."""
+    """Returns list of (label, df) sorted newest first. Skips malformed files."""
     files = sorted(glob.glob(f"{DATA_DIR}/snapshot_*.csv"), reverse=True)
     result = []
     for f in files:
+        try:
+            df = pd.read_csv(f, encoding="utf-8")
+        except UnicodeDecodeError:
+            try:
+                df = pd.read_csv(f, encoding="utf-16")
+            except Exception:
+                continue
+        except Exception:
+            continue
+        if not SNAPSHOT_COLS.issubset(set(df.columns)):
+            continue
         label = os.path.basename(f).replace("snapshot_", "").replace(".csv", "")
-        result.append((label, pd.read_csv(f)))
+        result.append((label, df))
     return result
 
 
