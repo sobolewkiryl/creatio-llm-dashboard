@@ -479,6 +479,8 @@ with tab_insights:
             cov_json = filtered[["Model", "Tags", "coverage_pct"]].to_dict(orient="records")
 
             delta_summary = ""
+            prompt_diff_summary = ""
+
             if cmp_filtered is not None:
                 cur_p = filtered.pivot_table(
                     index="Tags", columns="Model",
@@ -489,14 +491,50 @@ with tab_insights:
                     values="coverage_pct", aggfunc="first"
                 ).fillna(0)
                 delta_summary = (
-                    f"\n\nCHANGE vs previous period:\n"
+                    f"\n\nCOVERAGE CHANGE vs previous period (percentage points):\n"
                     f"{(cur_p - prv_p).round(1).to_string()}"
                 )
+
+                if prv_prompts is not None:
+                    cur_pf = cur_prompts[cur_prompts["Country"] == sel_country]
+                    prv_pf = prv_prompts[prv_prompts["Country"] == sel_country]
+                    mk = ["Country", "Model", "Keyword", "Tags"]
+                    prv_c = mk + ["mentioned"]
+                    if "Volume" in prv_pf.columns:
+                        prv_c.append("Volume")
+                    diff_ai = cur_pf.merge(prv_pf[prv_c], on=mk, how="outer", suffixes=("_cur", "_prv"))
+                    diff_ai["mentioned_cur"] = diff_ai["mentioned_cur"].fillna(False)
+                    diff_ai["mentioned_prv"] = diff_ai["mentioned_prv"].fillna(False)
+                    gained_ai = diff_ai[(diff_ai["mentioned_cur"]==True) & (diff_ai["mentioned_prv"]==False)].copy()
+                    lost_ai   = diff_ai[(diff_ai["mentioned_cur"]==False) & (diff_ai["mentioned_prv"]==True)].copy()
+                    vol_col = "Volume_cur" if "Volume_cur" in diff_ai.columns else ("Volume" if "Volume" in diff_ai.columns else None)
+
+                    def fmt_prompts(df, vc):
+                        rows = []
+                        for _, r in df.iterrows():
+                            vol_str = f" (vol: {int(r[vc]):,})" if vc and pd.notna(r.get(vc)) else ""
+                            rows.append(f"  - {r['Keyword']}{vol_str} [{r['Tags']} · {r['Model']}]")
+                        return "\n".join(rows) if rows else "  none"
+
+                    gained_vol = int(gained_ai[vol_col].fillna(0).sum()) if vol_col else "n/a"
+                    lost_vol   = int(lost_ai[vol_col].fillna(0).sum()) if vol_col else "n/a"
+                    net_vol    = (gained_vol - lost_vol) if isinstance(gained_vol, int) else "n/a"
+
+                    prompt_diff_summary = f"""
+
+PROMPT-LEVEL CHANGES:
+Gained ({len(gained_ai)} prompts, total volume: {gained_vol if isinstance(gained_vol,int) else gained_vol:,}):
+{fmt_prompts(gained_ai, vol_col)}
+
+Lost ({len(lost_ai)} prompts, total volume: {lost_vol if isinstance(lost_vol,int) else lost_vol:,}):
+{fmt_prompts(lost_ai, vol_col)}
+
+Net volume change: {f"{net_vol:+,}" if isinstance(net_vol, int) else net_vol}"""
 
             if custom_question.strip():
                 task = (
                     f'Answer this specific question:\n"{custom_question.strip()}"\n\n'
-                    f"Base your answer on the data provided. Be specific and reference actual numbers."
+                    f"Base your answer strictly on the data above. Reference actual prompt names, volumes, and cluster names."
                 )
             else:
                 task = """Provide a structured analysis:
@@ -504,7 +542,7 @@ with tab_insights:
 2. **Strongest clusters** — where does Creatio appear most consistently?
 3. **Blind spots** — where is visibility low or zero?
 4. **LLM differences** — notable differences between ChatGPT, Gemini, Copilot?
-5. **Key changes** (if delta data available) — what improved, what declined?
+5. **Key changes** (if delta data available) — what improved, what declined? Reference specific prompts and volumes.
 6. **Recommended actions** — 2-3 concrete priorities for the marketing team."""
 
             prompt = f"""You are a senior digital marketing analyst specializing in AI/LLM brand visibility for B2B SaaS.
@@ -512,11 +550,11 @@ with tab_insights:
 Analyze brand visibility data for Creatio (no-code CRM and workflow automation platform).
 
 COVERAGE DATA (country: {sel_country}):
-{json.dumps(cov_json, indent=2)}{delta_summary}
+{json.dumps(cov_json, indent=2)}{delta_summary}{prompt_diff_summary}
 
 {task}
 
-Write in clear business English. Reference actual numbers."""
+Write in clear business English. Reference actual prompt names and volume numbers where available."""
 
             with st.spinner("Analyzing with Claude…"):
                 try:
