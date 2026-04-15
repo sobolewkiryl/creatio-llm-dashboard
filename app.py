@@ -131,8 +131,11 @@ def compute_coverage(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_prompts(df: pd.DataFrame) -> pd.DataFrame:
+    cols = ["Country", "Model", "Keyword", "Tags", "mentioned"]
+    if "Volume" in df.columns:
+        cols.append("Volume")
     return (
-        df[["Country", "Model", "Keyword", "Tags", "mentioned"]]
+        df[cols]
         .drop_duplicates(subset=["Country", "Model", "Keyword"])
         .reset_index(drop=True)
     )
@@ -347,8 +350,11 @@ with tab_compare:
         prv_prm_f = prv_prompts[prv_prompts["Country"] == sel_country]
 
         merge_keys = ["Country", "Model", "Keyword", "Tags"]
+        prv_cols = merge_keys + ["mentioned"]
+        if "Volume" in prv_prm_f.columns:
+            prv_cols.append("Volume")
         diff = cur_prm_f.merge(
-            prv_prm_f[merge_keys + ["mentioned"]],
+            prv_prm_f[prv_cols],
             on=merge_keys, how="outer", suffixes=("_cur", "_prv"),
         )
         diff["mentioned_cur"] = diff["mentioned_cur"].fillna(False)
@@ -369,10 +375,11 @@ with tab_compare:
             if gained.empty:
                 st.caption("No new appearances.")
             else:
-                for _, row in gained.sort_values(["Tags", "Model"]).iterrows():
+                for _, row in gained.sort_values("Volume_cur" if "Volume_cur" in gained.columns else "Tags", ascending=False if "Volume_cur" in gained.columns else True).iterrows():
+                    vol = f' · vol: {int(row["Volume_cur"]):,}' if "Volume_cur" in row and pd.notna(row["Volume_cur"]) else ""
                     st.markdown(
                         f'<div class="gained"><strong>{row["Keyword"]}</strong>'
-                        f'<br><span style="opacity:.7">{row["Tags"]} · {row["Model"]}</span></div>',
+                        f'<br><span style="opacity:.7">{row["Tags"]} · {row["Model"]}{vol}</span></div>',
                         unsafe_allow_html=True,
                     )
         with col_l:
@@ -381,10 +388,11 @@ with tab_compare:
             if lost.empty:
                 st.caption("No lost appearances.")
             else:
-                for _, row in lost.sort_values(["Tags", "Model"]).iterrows():
+                for _, row in lost.sort_values("Volume_cur" if "Volume_cur" in lost.columns else "Tags", ascending=False if "Volume_cur" in lost.columns else True).iterrows():
+                    vol = f' · vol: {int(row["Volume_cur"]):,}' if "Volume_cur" in row and pd.notna(row["Volume_cur"]) else ""
                     st.markdown(
                         f'<div class="lost"><strong>{row["Keyword"]}</strong>'
-                        f'<br><span style="opacity:.7">{row["Tags"]} · {row["Model"]}</span></div>',
+                        f'<br><span style="opacity:.7">{row["Tags"]} · {row["Model"]}{vol}</span></div>',
                         unsafe_allow_html=True,
                     )
 
