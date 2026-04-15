@@ -222,8 +222,8 @@ llms = sorted(filtered["Model"].unique())
 
 # ── tabs ──────────────────────────────────────────────────────────────────────
 
-tab_overview, tab_compare, tab_responses, tab_insights = st.tabs([
-    "📊 Overview", "🔄 Period Comparison", "💬 LLM Responses", "🤖 AI Insights"
+tab_overview, tab_compare, tab_responses, tab_sources, tab_insights = st.tabs([
+    "📊 Overview", "🔄 Period Comparison", "💬 LLM Responses", "🔗 Sources", "🤖 AI Insights"
 ])
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -587,3 +587,124 @@ Write in clear business English. Reference actual prompt names and volume number
                 file_name=f"insights_{sel_country}.txt",
                 mime="text/plain",
             )
+
+# ════════════════════════════════════════════════════════════════════════════
+# TAB — SOURCES
+# ════════════════════════════════════════════════════════════════════════════
+with tab_sources:
+
+    st.markdown('<div class="section-title">Source URL comparison</div>',
+                unsafe_allow_html=True)
+
+    def extract_sources(df: pd.DataFrame) -> pd.DataFrame:
+        """Explode Link URL + Link Title into one row per source URL."""
+        rows = []
+        for _, row in df.iterrows():
+            urls   = str(row.get("Link URL", "")).strip().split("\n")
+            titles = str(row.get("Link Title", "")).strip().split("\n")
+            for i, url in enumerate(urls):
+                url = url.strip()
+                if not url.startswith("http"):
+                    continue
+                title = titles[i].strip() if i < len(titles) else ""
+                try:
+                    from urllib.parse import urlparse
+                    domain = urlparse(url).netloc.replace("www.", "")
+                except Exception:
+                    domain = ""
+                rows.append({
+                    "Country":  row.get("Country", ""),
+                    "Model":    row.get("Model", ""),
+                    "Keyword":  row.get("Keyword", ""),
+                    "Tags":     row.get("Tags", ""),
+                    "URL":      url,
+                    "Title":    title,
+                    "Domain":   domain,
+                })
+        return pd.DataFrame(rows)
+
+    if prv_merged is None:
+        st.info("Upload a previous period export in the sidebar to compare sources.")
+    else:
+        cur_src = extract_sources(cur_merged[cur_merged["Country"] == sel_country])
+        prv_src = extract_sources(prv_merged[prv_merged["Country"] == sel_country])
+
+        # filters
+        sc1, sc2 = st.columns(2)
+        with sc1:
+            s_llm = st.selectbox("LLM", ["All"] + llms, key="s_llm")
+        with sc2:
+            s_cluster = st.selectbox(
+                "Cluster",
+                ["All"] + sorted(cur_merged["Tags"].dropna().unique()),
+                key="s_cluster",
+            )
+
+        def apply_filters(df):
+            if s_llm     != "All": df = df[df["Model"] == s_llm]
+            if s_cluster != "All": df = df[df["Tags"]  == s_cluster]
+            return df
+
+        cur_f = apply_filters(cur_src)
+        prv_f = apply_filters(prv_src)
+
+        cur_urls = set(cur_f["URL"].unique())
+        prv_urls = set(prv_f["URL"].unique())
+
+        new_urls  = cur_urls - prv_urls   # appeared in current, not in previous
+        lost_urls = prv_urls - cur_urls   # were in previous, gone now
+
+        col_n, col_l = st.columns(2)
+
+        with col_n:
+            st.markdown(f"### 🆕 New sources ({len(new_urls)})")
+            st.caption("URLs that appeared in current period but not in previous")
+            if not new_urls:
+                st.caption("No new sources.")
+            else:
+                new_df = cur_f[cur_f["URL"].isin(new_urls)].drop_duplicates("URL")
+                new_df = new_df.sort_values(["Domain", "Tags"])
+                for _, row in new_df.iterrows():
+                    st.markdown(
+                        f'<div class="gained">' +
+                        f'<strong><a href="{row["URL"]}" target="_blank" style="color:#4ade80">{row["Title"] or row["URL"][:60]}</a></strong>' +
+                        f'<br><span style="opacity:.7">{row["Domain"]} · {row["Tags"]} · {row["Model"]}</span>' +
+                        f'<br><span style="opacity:.5;font-size:0.75rem">{row["Keyword"]}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+
+        with col_l:
+            st.markdown(f"### ❌ Lost sources ({len(lost_urls)})")
+            st.caption("URLs present in previous period but no longer cited")
+            if not lost_urls:
+                st.caption("No lost sources.")
+            else:
+                lost_df = prv_f[prv_f["URL"].isin(lost_urls)].drop_duplicates("URL")
+                lost_df = lost_df.sort_values(["Domain", "Tags"])
+                for _, row in lost_df.iterrows():
+                    st.markdown(
+                        f'<div class="lost">' +
+                        f'<strong><a href="{row["URL"]}" target="_blank" style="color:#f87171">{row["Title"] or row["URL"][:60]}</a></strong>' +
+                        f'<br><span style="opacity:.7">{row["Domain"]} · {row["Tags"]} · {row["Model"]}</span>' +
+                        f'<br><span style="opacity:.5;font-size:0.75rem">{row["Keyword"]}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+
+        st.markdown('<div class="section-title">Sources in current period</div>',
+                    unsafe_allow_html=True)
+        if not cur_f.empty:
+            display_df = (
+                cur_f[["Domain","URL","Title","Tags","Model","Keyword"]]
+                .drop_duplicates("URL")
+                .sort_values(["Domain","Tags"])
+                .reset_index(drop=True)
+            )
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇ Download sources CSV",
+                data=cur_f.drop_duplicates("URL").to_csv(index=False).encode(),
+                file_name=f"sources_{sel_country}.csv",
+                mime="text/csv",
+            )
+        else:
+            st.caption("No sources found for selected filters.")
