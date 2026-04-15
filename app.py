@@ -27,6 +27,9 @@ LLM_COLORS = {
     "Copilot": "#7B61FF",
 }
 
+SNAPSHOT_COLS = {"Country", "Model", "Tags", "coverage_pct"}
+PROMPTS_COLS  = {"Country", "Model", "Keyword", "Tags", "mentioned"}
+
 # ── styles ────────────────────────────────────────────────────────────────────
 
 st.markdown("""
@@ -76,11 +79,8 @@ div[data-testid="stSidebar"] {
     border-radius:8px; padding:0.7rem 1rem;
     color:#cca600; font-size:0.82rem;
 }
-.info-box {
-    background:#0d1a0d; border:1px solid #1a3a1a;
-    border-radius:8px; padding:0.7rem 1rem;
-    color:#7aba7a; font-size:0.82rem;
-}
+.gained { background:#052e16; border:1px solid #14532d; border-radius:8px; padding:0.6rem 1rem; margin-bottom:0.3rem; color:#4ade80; font-size:0.85rem; }
+.lost   { background:#2d0a0a; border:1px solid #7f1d1d; border-radius:8px; padding:0.6rem 1rem; margin-bottom:0.3rem; color:#f87171; font-size:0.85rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -134,27 +134,44 @@ def compute_coverage(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-SNAPSHOT_COLS = {"Country", "Model", "Tags", "coverage_pct"}
+def compute_prompts(df: pd.DataFrame) -> pd.DataFrame:
+    """Prompt-level snapshot: one row per Country / Model / Keyword."""
+    return (
+        df[["Country", "Model", "Keyword", "Tags", "mentioned"]]
+        .drop_duplicates(subset=["Country", "Model", "Keyword"])
+        .reset_index(drop=True)
+    )
+
 
 def load_snapshots() -> list:
-    """Returns list of (label, df) sorted newest first. Skips malformed files."""
     files = sorted(glob.glob(f"{DATA_DIR}/snapshot_*.csv"), reverse=True)
     result = []
     for f in files:
         try:
             df = pd.read_csv(f, encoding="utf-8")
-        except UnicodeDecodeError:
-            try:
-                df = pd.read_csv(f, encoding="utf-16")
-            except Exception:
-                continue
         except Exception:
             continue
         if not SNAPSHOT_COLS.issubset(set(df.columns)):
             continue
         label = os.path.basename(f).replace("snapshot_", "").replace(".csv", "")
-        result.append((label, df))
+        # try loading companion prompts file
+        prompts_path = f"{DATA_DIR}/prompts_{label}.csv"
+        prompts_df = None
+        if os.path.exists(prompts_path):
+            try:
+                p = pd.read_csv(prompts_path)
+                if PROMPTS_COLS.issubset(set(p.columns)):
+                    prompts_df = p
+            except Exception:
+                pass
+        result.append((label, df, prompts_df))
     return result
+
+
+def save_snapshot(coverage: pd.DataFrame, prompts: pd.DataFrame, label: str):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    coverage.to_csv(f"{DATA_DIR}/snapshot_{label}.csv", index=False)
+    prompts.to_csv(f"{DATA_DIR}/prompts_{label}.csv", index=False)
 
 
 def load_hashes() -> set:
@@ -169,13 +186,6 @@ def save_hash(h: str):
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(f"{DATA_DIR}/.hashes", "a") as f:
         f.write(h + "\n")
-
-
-def save_snapshot(df: pd.DataFrame, label: str) -> str:
-    os.makedirs(DATA_DIR, exist_ok=True)
-    path = f"{DATA_DIR}/snapshot_{label}.csv"
-    df.to_csv(path, index=False)
-    return path
 
 
 def metric_card(label: str, value: float, prev=None):
@@ -194,7 +204,7 @@ def metric_card(label: str, value: float, prev=None):
     </div>""", unsafe_allow_html=True)
 
 
-# ── load saved snapshots ──────────────────────────────────────────────────────
+# ── load snapshots ────────────────────────────────────────────────────────────
 
 snapshots   = load_snapshots()
 snap_labels = [s[0] for s in snapshots]
@@ -205,7 +215,6 @@ with st.sidebar:
     st.markdown("## 📡 LLM Visibility")
     st.markdown("---")
 
-    # ── data source ──
     st.markdown("**Data source**")
     data_mode = st.radio(
         "data_mode", ["Upload new export", "Use saved snapshot"],
@@ -214,6 +223,7 @@ with st.sidebar:
 
     uploaded      = None
     current_snap  = None
+    current_prompts = None
     snapshot_label = str(date.today())
 
     if data_mode == "Upload new export":
@@ -229,47 +239,50 @@ with st.sidebar:
         process_btn = False
         if snap_labels:
             chosen = st.selectbox("Select snapshot", snap_labels)
-            current_snap = next(s[1] for s in snapshots if s[0] == chosen)
+            chosen_snap = next(s for s in snapshots if s[0] == chosen)
+            current_snap    = chosen_snap[1]
+            current_prompts = chosen_snap[2]
+            snapshot_label  = chosen
         else:
             st.info("No saved snapshots yet. Upload a file first.")
 
     st.markdown("---")
-
-    # ── compare with ──
     st.markdown("**Compare with**")
-    compare_snap = None
-    compare_options = ["— none —"] + snap_labels
+    compare_snap    = None
+    compare_prompts = None
 
-    # If using saved snapshot, exclude the currently selected one from compare list
+    compare_options = ["— none —"] + snap_labels
     if data_mode == "Use saved snapshot" and snap_labels:
         compare_options = ["— none —"] + [l for l in snap_labels if l != chosen]
 
     if len(compare_options) > 1:
         cmp_choice = st.selectbox("Period", compare_options, label_visibility="collapsed")
         if cmp_choice != "— none —":
-            compare_snap = next(s[1] for s in snapshots if s[0] == cmp_choice)
+            cmp_snap = next(s for s in snapshots if s[0] == cmp_choice)
+            compare_snap    = cmp_snap[1]
+            compare_prompts = cmp_snap[2]
     else:
         st.caption("Save at least 2 snapshots to enable comparison.")
 
     st.markdown("---")
-anthropic_key = st.secrets.get("ANTHROPIC_API_KEY", "")
-if not anthropic_key:
-    anthropic_key = st.text_input("Anthropic API key", type="password",
-                                  help="Required for AI Insights tab")
+    anthropic_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+    if not anthropic_key:
+        anthropic_key = st.text_input("Anthropic API key", type="password")
+
     st.caption("Creatio · Brand Visibility Tracker")
 
 # ── resolve active data ───────────────────────────────────────────────────────
 
-merged   = None
-coverage = None
+merged          = None
+coverage        = None
+active_prompts  = None
 
 if data_mode == "Upload new export":
     if uploaded is None:
-        # Show latest snapshot if available, otherwise landing screen
         st.markdown("# LLM Brand Visibility")
         if snapshots:
             st.info("No file uploaded. Showing latest saved snapshot.")
-            _, latest_df = snapshots[0]
+            _, latest_df, _ = snapshots[0]
             sel = st.selectbox("Country", sorted(latest_df["Country"].unique()))
             flt = latest_df[latest_df["Country"] == sel]
             pivot = flt.pivot_table(
@@ -283,48 +296,43 @@ if data_mode == "Upload new export":
                 use_container_width=True, hide_index=True,
             )
         else:
-            st.info("Upload an Ahrefs Brand Radar CSV to get started.")
+            st.info("Upload an Ahrefs Brand Radar CSV export to get started.")
         st.stop()
 
-    # Check for duplicate file
     raw_bytes = uploaded.read()
     h = file_hash(raw_bytes)
-    existing_hashes = load_hashes()
-
-    if h in existing_hashes:
-        st.error(
-            "⛔ This file has already been imported. "
-            "Please upload a different export or use 'Use saved snapshot' to view existing data."
-        )
+    if h in load_hashes():
+        st.error("⛔ This file has already been imported. Upload a different export.")
         st.stop()
 
     merged, unmatched = process_export(raw_bytes)
 
     if unmatched:
         with st.expander(f"⚠️ {len(unmatched)} prompts not found in clusters.csv"):
-            st.caption("Add these to clusters.csv and push to GitHub.")
             for kw in unmatched:
                 st.markdown(f"- `{kw}`")
 
     if process_btn:
         with st.spinner("Processing…"):
             cov_save = compute_coverage(merged)
-            save_snapshot(cov_save, snapshot_label)
+            prm_save = compute_prompts(merged)
+            save_snapshot(cov_save, prm_save, snapshot_label)
             save_hash(h)
-        st.success(f"Snapshot `{snapshot_label}` saved. Push the `data/` folder to GitHub.")
+        st.success(f"Snapshot `{snapshot_label}` saved. Upload `data/snapshot_{snapshot_label}.csv` and `data/prompts_{snapshot_label}.csv` to GitHub.")
         st.cache_data.clear()
         snapshots   = load_snapshots()
         snap_labels = [s[0] for s in snapshots]
 
-    coverage = compute_coverage(merged)
+    coverage       = compute_coverage(merged)
+    active_prompts = compute_prompts(merged)
 
 else:
-    # Use saved snapshot
     if current_snap is None:
         st.markdown("# LLM Brand Visibility")
         st.info("No saved snapshots yet. Upload a file first.")
         st.stop()
-    coverage = current_snap
+    coverage       = current_snap
+    active_prompts = current_prompts
 
 # ── global filters ────────────────────────────────────────────────────────────
 
@@ -389,12 +397,23 @@ with tab_overview:
             .background_gradient(cmap="Greens", subset=pct_cols, vmin=0, vmax=100),
         use_container_width=True, hide_index=True,
     )
-    st.download_button(
-        "⬇ Download snapshot CSV",
-        data=coverage.to_csv(index=False).encode(),
-        file_name=f"snapshot_{snapshot_label}.csv",
-        mime="text/csv",
-    )
+
+    col_dl1, col_dl2 = st.columns(2)
+    with col_dl1:
+        st.download_button(
+            "⬇ Download snapshot CSV",
+            data=coverage.to_csv(index=False).encode(),
+            file_name=f"snapshot_{snapshot_label}.csv",
+            mime="text/csv",
+        )
+    if active_prompts is not None:
+        with col_dl2:
+            st.download_button(
+                "⬇ Download prompts CSV",
+                data=active_prompts.to_csv(index=False).encode(),
+                file_name=f"prompts_{snapshot_label}.csv",
+                mime="text/csv",
+            )
 
 # ════════════════════════════════════════════════════════════════════════════
 # TAB 2 — PERIOD COMPARISON
@@ -412,9 +431,9 @@ with tab_compare:
         ).fillna(0)
         delta_piv = (cur_piv - prv_piv).round(1)
 
+        # ── cluster delta charts ──
         st.markdown('<div class="section-title">Coverage change per LLM</div>',
                     unsafe_allow_html=True)
-
         for llm in llms:
             if llm not in delta_piv.columns:
                 continue
@@ -440,6 +459,7 @@ with tab_compare:
             )
             st.plotly_chart(fig2, use_container_width=True)
 
+        # ── delta table ──
         st.markdown('<div class="section-title">Delta table</div>',
                     unsafe_allow_html=True)
         delta_display = delta_piv.reset_index()
@@ -460,13 +480,79 @@ with tab_compare:
             use_container_width=True, hide_index=True,
         )
 
+        # ── prompt-level diff ──
+        st.markdown('<div class="section-title">Prompt-level changes</div>',
+                    unsafe_allow_html=True)
+
+        cur_prm = active_prompts
+        prv_prm = compare_prompts
+
+        if cur_prm is None or prv_prm is None:
+            st.info(
+                "Prompt-level diff requires both snapshots to have prompt data. "
+                "This is available for snapshots generated after the latest app update. "
+                "Re-import your exports to generate prompt data."
+            )
+        else:
+            cur_prm_f = cur_prm[cur_prm["Country"] == sel_country]
+            prv_prm_f = prv_prm[prv_prm["Country"] == sel_country]
+
+            merge_keys = ["Country", "Model", "Keyword", "Tags"]
+            diff = cur_prm_f.merge(
+                prv_prm_f[merge_keys + ["mentioned"]],
+                on=merge_keys,
+                how="outer",
+                suffixes=("_cur", "_prv"),
+            )
+            diff["mentioned_cur"] = diff["mentioned_cur"].fillna(False)
+            diff["mentioned_prv"] = diff["mentioned_prv"].fillna(False)
+
+            gained = diff[(diff["mentioned_cur"] == True)  & (diff["mentioned_prv"] == False)]
+            lost   = diff[(diff["mentioned_cur"] == False) & (diff["mentioned_prv"] == True)]
+
+            # filter by LLM
+            sel_llm_diff = st.selectbox(
+                "Filter by LLM", ["All"] + llms, key="diff_llm"
+            )
+            if sel_llm_diff != "All":
+                gained = gained[gained["Model"] == sel_llm_diff]
+                lost   = lost[lost["Model"] == sel_llm_diff]
+
+            col_g, col_l = st.columns(2)
+
+            with col_g:
+                st.markdown(f"### ✅ Gained ({len(gained)})")
+                st.caption("Creatio appeared in these prompts (wasn't there before)")
+                if gained.empty:
+                    st.caption("No new appearances.")
+                else:
+                    for _, row in gained.sort_values(["Tags", "Model"]).iterrows():
+                        st.markdown(
+                            f'<div class="gained"><strong>{row["Keyword"]}</strong>'
+                            f'<br><span style="opacity:.7">{row["Tags"]} · {row["Model"]}</span></div>',
+                            unsafe_allow_html=True,
+                        )
+
+            with col_l:
+                st.markdown(f"### ❌ Lost ({len(lost)})")
+                st.caption("Creatio disappeared from these prompts")
+                if lost.empty:
+                    st.caption("No lost appearances.")
+                else:
+                    for _, row in lost.sort_values(["Tags", "Model"]).iterrows():
+                        st.markdown(
+                            f'<div class="lost"><strong>{row["Keyword"]}</strong>'
+                            f'<br><span style="opacity:.7">{row["Tags"]} · {row["Model"]}</span></div>',
+                            unsafe_allow_html=True,
+                        )
+
 # ════════════════════════════════════════════════════════════════════════════
 # TAB 3 — LLM RESPONSES
 # ════════════════════════════════════════════════════════════════════════════
 with tab_responses:
 
     if merged is None:
-        st.info("LLM Responses are only available when uploading a new export file. "
+        st.info("LLM Responses are only available when uploading a new export. "
                 "Switch to 'Upload new export' in the sidebar.")
     else:
         st.markdown('<div class="section-title">Response explorer</div>',
@@ -534,15 +620,13 @@ with tab_insights:
             unsafe_allow_html=True,
         )
     else:
-        # Custom question
         custom_question = st.text_area(
             "Your question (optional)",
             placeholder=(
-                "e.g. Why is our visibility in AI Agents so low compared to FinServ? "
-                "What should we do to improve coverage in CRM T-1 for ChatGPT?"
+                "e.g. Why is our visibility in AI Agents so low? "
+                "What should we prioritize to improve CRM T-1 coverage in ChatGPT?"
             ),
             height=90,
-            help="Leave blank for a full general analysis, or ask a specific question about the data.",
         )
 
         if st.button("🤖 Generate insights", type="primary"):
@@ -559,35 +643,34 @@ with tab_insights:
                     values="coverage_pct", aggfunc="first"
                 ).fillna(0)
                 delta_summary = (
-                    f"\n\nCHANGE vs previous period (percentage points):\n"
+                    f"\n\nCHANGE vs previous period:\n"
                     f"{(cur_p - prv_p).round(1).to_string()}"
                 )
 
             if custom_question.strip():
                 task = (
-                    f"Answer this specific question from the marketing team:\n"
-                    f"\"{custom_question.strip()}\"\n\n"
-                    f"Base your answer strictly on the data provided. Be specific and reference actual numbers."
+                    f'Answer this specific question:\n"{custom_question.strip()}"\n\n'
+                    f"Base your answer on the data provided. Be specific and reference actual numbers."
                 )
             else:
                 task = """Provide a structured analysis:
 1. **Overall performance** — how is Creatio performing across LLMs?
-2. **Strongest clusters** — where does Creatio appear most consistently and why?
+2. **Strongest clusters** — where does Creatio appear most consistently?
 3. **Blind spots** — where is visibility low or zero?
 4. **LLM differences** — notable differences between ChatGPT, Gemini, Copilot?
 5. **Key changes** (if delta data available) — what improved, what declined?
 6. **Recommended actions** — 2-3 concrete priorities for the marketing team."""
 
-            prompt = f"""You are a senior digital marketing analyst specializing in AI/LLM brand visibility for B2B SaaS companies.
+            prompt = f"""You are a senior digital marketing analyst specializing in AI/LLM brand visibility for B2B SaaS.
 
-Analyze the following brand visibility data for Creatio (a no-code CRM and workflow automation platform) across LLM models.
+Analyze brand visibility data for Creatio (no-code CRM and workflow automation platform).
 
 COVERAGE DATA (country: {sel_country}):
 {json.dumps(cov_json, indent=2)}{delta_summary}
 
 {task}
 
-Write in clear business English. Be specific and reference actual numbers from the data."""
+Write in clear business English. Reference actual numbers."""
 
             with st.spinner("Analyzing with Claude…"):
                 try:
