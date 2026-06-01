@@ -89,6 +89,14 @@ div[data-testid="stSidebar"] {
 @st.cache_data
 def load_clusters() -> pd.DataFrame:
     df = pd.read_csv(CLUSTERS_FILE)
+    df.columns = df.columns.str.strip()
+
+    # handle different possible column names
+    col_map = {c.lower(): c for c in df.columns}
+    prompt_col = col_map.get("prompt") or col_map.get("keyword") or col_map.get("prompts") or df.columns[0]
+    tags_col   = col_map.get("tags")   or col_map.get("cluster") or col_map.get("tag")    or df.columns[1]
+
+    df = df.rename(columns={prompt_col: "Prompt", tags_col: "Tags"})
     df["Keyword_lower"] = df["Prompt"].str.strip().str.lower()
     return df[["Keyword_lower", "Tags"]]
 
