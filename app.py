@@ -86,19 +86,7 @@ div[data-testid="stSidebar"] {
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
-@st.cache_data
-def load_clusters() -> pd.DataFrame:
-    df = pd.read_csv(CLUSTERS_FILE)
-    df.columns = df.columns.str.strip()
-
-    # handle different possible column names
-    col_map = {c.lower(): c for c in df.columns}
-    prompt_col = col_map.get("prompt") or col_map.get("keyword") or col_map.get("prompts") or df.columns[0]
-    tags_col   = col_map.get("tags")   or col_map.get("cluster") or col_map.get("tag")    or df.columns[1]
-
-    df = df.rename(columns={prompt_col: "Prompt", tags_col: "Tags"})
-    df["Keyword_lower"] = df["Prompt"].str.strip().str.lower()
-    return df[["Keyword_lower", "Tags"]]
+# clusters.csv no longer needed — Tags come directly from Ahrefs export
 
 
 def mentions_brand(cell) -> bool:
@@ -118,10 +106,14 @@ def process_export(raw_bytes: bytes) -> tuple:
     df.columns = df.columns.str.strip()
     df["Keyword_lower"] = df["Keyword"].str.strip().str.lower()
     df["mentioned"] = df["Mentions"].apply(mentions_brand)
-    clusters = load_clusters()
-    merged = df.merge(clusters, on="Keyword_lower", how="left")
-    unmatched = sorted(merged[merged["Tags"].isna()]["Keyword"].unique().tolist())
-    return merged[merged["Tags"].notna()].copy(), unmatched
+
+    # Tags column comes directly from Ahrefs export
+    if "Tags" not in df.columns:
+        st.error("This export doesn't have a 'Tags' column. Please use the full Ahrefs Brand Radar export.")
+        st.stop()
+
+    unmatched = []  # no longer needed — all prompts have tags from Ahrefs
+    return df[df["Tags"].notna()].copy(), unmatched
 
 
 def compute_coverage(df: pd.DataFrame) -> pd.DataFrame:
